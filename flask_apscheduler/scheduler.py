@@ -16,8 +16,11 @@
 
 import logging
 import socket
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.manual import ManualTrigger
 from . import views
 from .utils import fix_job_def, pop_trigger
 
@@ -184,13 +187,126 @@ class APScheduler(object):
         """
         self.__scheduler.resume_job(id, jobstore)
 
-    def run_job(self, id, jobstore=None):
+    def get_job_submission(self, job_submission_id, jobstore=None):
+        """
+        Gets the specific job_submission by ID
+        
+        :param str|int id: the identifier of the job_submission
+        :param str jobstore: alias of the jobstore that contains the job submission
+        :rtype: dict
+        """
+
+        return self.__scheduler.get_job_submission(jobstore, job_submission_id)
+
+    def get_job_submissions(self, jobstore=None):
+        """
+        Get all job_submissions in the jobstore
+        
+        :param str jobstore: alias of the jobstore that contains the job submission
+        :rtype: list(dict)
+        """
+
+        return self.__scheduler.get_job_submissions(jobstore)
+
+    def get_job_statuses(self, jobstore=None):
+        """
+        Get all the  of all jobs, where status one of the following:
+           
+
+           states = { 'ok', 'failing', 'orphaned', 'missed' }
+           statuses = {'running', 'paused', 'scheduled', 'not scheduled' }
+
+           1. 'ok':      Job is scheduled to be run, and has not recently failed
+           2. 'running': Job is currently running, or waiting to be run in a queue on the executor
+           3. 'paused':  Job is paused, and will not run until resumed
+           4. 'failing': Job has failed, at least once, in the last 'n' minutes, where n is
+           provided via the ``job_failing_window`` parameter.
+           5. 'not scheduled': The job has trigger-type ``Date``, and has no ``next_run_time``.
+           6. 'orphaned':      The job has recently been abandoned due to the scheduler crashing after submission
+           7. 'missed':        The job has recently been missed due to the scheduler crashing before submission
+
+        :rtype: list(dict) 
+           [{'job_id': 123, 'state': 'paused', 'status': 'ok'},
+            {'job_id': 124, 'state': 'running', 'status': 'failing'}
+            ...
+            {'job_id': 1000, 'state': 'not scheduled', 'status': 'failing'}]
+        """
+        
+        # TODO: This should happen at APScheduler level...
+        jobs = self.__scheduler.get_jobs(jobstore)
+        job_submissions = self.__scheduler.get_job_submissions(jobstore)
+        
+        job_subs_grouped_by_job_id = {}
+        for js in job_submissions:
+            job_id = js['apscheduler_job_id']
+            if job_subs_grouped_by_job_id.get(job_id):
+                job_subs_grouped_by_job_id[job_id].append(js)
+            else:
+                job_subs_grouped_by_job_id[job_id] = [js]
+        # END TODO
+        jobs_and_statuses = []
+        job_failing_window = 720 # 12 hours
+        
+        for j in jobs:
+            job_subs = job_subs_grouped_by_job_id.get(j.id)
+            #########################
+            ### Determine status
+            #########################
+            
+            # OK Success states
+            status = "ok"
+            state = "scheduled"
+            if j.next_run_time == None:
+                if isinstance(j.trigger, DateTrigger) or isinstance(j.trigger, ManualTrigger):
+                    state = "not scheduled"
+                else:
+                    state = "paused"
+            if job_subs:
+                job_subs.sort(key=lambda k: k['submitted_at'])
+                failed_jobs_in_window = filter(lambda js: js['submitted_at'] > 
+                                                           datetime.now() - timedelta(minutes = job_failing_window)
+                                                           and js['state'] == "failure", job_subs)
+                most_recent_js = job_subs[-1]                
+                if most_recent_js['state'] == "submitted":
+                    state = "running"
+                # Warning states
+                if most_recent_js['state'] == "missed":
+                    status = "missed"
+                if most_recent_js['state'] == "orphaned":
+                    status = "orphaned"
+                # Critical states
+                if len(failed_jobs_in_window) > 0:
+                    status = "failing"
+            jobs_and_statuses.append({'job_id': j.id, 'state': state, 'status': status})
+        return jobs_and_statuses
+
+    def get_job_submissions_for_job(self, job_id, jobstore=None):
+        """
+        Get all job_submissions for a given job_id in the jobstore
+        
+        :param str jobstore: alias of the jobstore that contains the job submission
+        :rtype: list(dict)
+
+        """
+        return sorted(self.__scheduler.get_job_submissions_for_job(jobstore, job_id),
+                      key=lambda js: js['submitted_at'],
+                      reverse=True)
+
+    def run_job(self, id, job_kwargs=None, jobstore=None):
         job = self.__scheduler.get_job(id, jobstore)
 
         if not job:
             raise LookupError(id)
+        
+        if job_kwargs:
+            # This does not persist to the jobstore !
 
-        job.func(*job.args, **job.kwargs)
+            job._modify(**{'kwargs': job_kwargs})
+
+        self.__scheduler._executors[job.executor]\
+                        .submit_job(job, datetime.now())
+         
+        # job.func(*job.args, **job.kwargs)
 
     def __load_config(self):
         """Loads the configuration from the Flask configuration."""
@@ -242,3 +358,8 @@ class APScheduler(object):
         self.app.add_url_rule('/scheduler/jobs/<job_id>/pause', 'pause_job', views.pause_job, methods=['POST'])
         self.app.add_url_rule('/scheduler/jobs/<job_id>/resume', 'resume_job', views.resume_job, methods=['POST'])
         self.app.add_url_rule('/scheduler/jobs/<job_id>/run', 'run_job', views.run_job, methods=['POST'])
+        # Job Submission Routes
+        self.app.add_url_rule('/scheduler/jobs/<job_id>/job_submissions', 'get_job_submissions_for_job', views.get_job_submissions_for_job, methods=['GET'])
+        self.app.add_url_rule('/scheduler/job_submissions', 'get_job_submissions', views.get_job_submissions, methods=['GET'])
+        self.app.add_url_rule('/scheduler/job_submissions/<job_submission_id>', 'get_job_submission', views.get_job_submission, methods=['GET'])
+        self.app.add_url_rule('/scheduler/jobs/statuses', 'get_job_statuses', views.get_job_statuses, methods=['GET'])

@@ -32,11 +32,31 @@ def get_scheduler_info():
     return jsonify(d)
 
 
+def get_job_submissions():
+    job_submissions = current_app.apscheduler.get_job_submissions()
+    return jsonify(job_submissions)
+
+def get_job_submission(job_submission_id):
+    job_submission = current_app.apscheduler.get_job_submission(job_submission_id)
+    if not job_submission:
+        return jsonify(dict(error_message='Job Submission %s not found' % job_submission_id), status=404)
+    return jsonify(job_submission)   
+
+def get_running_jobs():
+    return jsonify(current_app.apscheduler.get_running_jobs())
+
+def get_job_statuses():
+    return jsonify(current_app.apscheduler.get_job_statuses())
+
+def get_job_submissions_for_job(job_id):
+    job_submissions = current_app.apscheduler.get_job_submissions_for_job(job_id)
+    return jsonify(job_submissions)
+
 def add_job():
     """Adds a new job."""
 
     data = request.get_json(force=True)
-
+ 
     try:
         job = current_app.apscheduler.add_job(**data)
         return jsonify(job)
@@ -126,8 +146,10 @@ def resume_job(job_id):
 def run_job(job_id):
     """Executes a job."""
 
+    kwargs = request.get_json(force=True)
+    
     try:
-        current_app.apscheduler.run_job(job_id)
+        current_app.apscheduler.run_job(job_id, job_kwargs=kwargs)
         job = current_app.apscheduler.get_job(job_id)
         return jsonify(job)
     except LookupError:
