@@ -32,6 +32,7 @@ def job_to_dict(job):
     data['func'] = job.func_ref
     data['args'] = job.args
     data['kwargs'] = job.kwargs
+    data['kwarg_metadata'] = job.kwarg_metadata
 
     data.update(trigger_to_dict(job.trigger))
 
